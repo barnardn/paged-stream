@@ -3,11 +3,13 @@ use crate::PageableStream;
 // implemenation of PageableStream for vectors. not especially useful, just a
 // demo impl to validate the scaffolding.
 
+#[allow(dead_code)]
 pub struct PagedVecStream<'a, T> {
     index: usize,
     source: &'a Vec<T>,
 }
 
+#[allow(dead_code)]
 impl<'a, T> PagedVecStream<'a, T> {
     pub fn new(source: &'a Vec<T>) -> Self {
         PagedVecStream { index: 0, source }

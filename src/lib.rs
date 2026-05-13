@@ -1,6 +1,7 @@
 use std::future::Future;
 
-pub mod vec;
+pub mod file;
+pub(crate) mod vec;
 
 pub trait PageableStream {
     type Item;
