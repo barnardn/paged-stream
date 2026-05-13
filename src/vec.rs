@@ -2,20 +2,19 @@ use crate::PageableStream;
 
 // implemenation of PageableStream for vectors. not especially useful, just a
 // demo impl to validate the scaffolding.
-//
 
 pub struct PagedVecStream<'a, T> {
     index: usize,
-    source: &'a T,
+    source: &'a Vec<T>,
 }
 
 impl<'a, T> PagedVecStream<'a, T> {
-    pub fn new(source: &'a T) -> Self {
+    pub fn new(source: &'a Vec<T>) -> Self {
         PagedVecStream { index: 0, source }
     }
 }
 
-impl<'a, T: Sync> PageableStream for PagedVecStream<'a, Vec<T>> {
+impl<'a, T: Sync> PageableStream for PagedVecStream<'a, T> {
     type Item = T;
 
     async fn prev(&mut self) -> Option<&Self::Item> {
