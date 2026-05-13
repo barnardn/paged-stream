@@ -1,5 +1,5 @@
+use core::time;
 use std::future::Future;
-use std::ops::Index;
 use tokio;
 
 pub trait PagableStream {
@@ -19,27 +19,26 @@ impl<'a, T> PagedStream<'a, T> {
     }
 }
 
-impl<'a, T> PagableStream for PagedStream<'a, T>
-where
-    T: Index<usize> + Sync,
-    T::Output: Sized + Sync,
-{
-    type Item = T::Output;
+impl<'a, T: Sync> PagableStream for PagedStream<'a, Vec<T>> {
+    type Item = T;
 
     async fn prev(&mut self) -> Option<&Self::Item> {
         if self.index == 0 {
             return None;
+        } else {
+            self.index -= 1;
+            Some(&self.source[self.index])
         }
-        self.index -= 1;
-        Some(&self.source.index(self.index))
     }
 
     async fn next(&mut self) -> Option<&Self::Item> {
-        if self.index == 0 {
+        if self.index == self.source.len() {
             return None;
+        } else {
+            let value = &self.source[self.index];
+            self.index += 1;
+            Some(value)
         }
-        self.index += 1;
-        Some(&self.source.index(self.index))
     }
 }
 
@@ -50,11 +49,18 @@ mod test {
     use super::PagedStream;
 
     #[tokio::test]
-    async fn does_it_run() {
+    async fn basics() {
         let test_vec = vec![1, 2, 3];
 
-        let st = PagedStream::new(&test_vec);
+        let mut st = PagedStream::new(&test_vec);
+        assert_eq!(st.prev().await, None);
+        assert_eq!(st.next().await, Some(&1));
         assert_eq!(st.next().await, Some(&2));
+        assert_eq!(st.next().await, Some(&3));
+        assert_eq!(st.next().await, None);
+        assert_eq!(st.prev().await, Some(&3));
+        assert_eq!(st.prev().await, Some(&2));
         assert_eq!(st.prev().await, Some(&1));
+        assert_eq!(st.prev().await, None);
     }
 }
