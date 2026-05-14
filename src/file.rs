@@ -1,4 +1,5 @@
-use crate::PageableStream;
+use crate::{PageableStream, PageableStreamError};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -45,6 +46,26 @@ impl PagedFileStream {
                 has_more: true,
             })),
         }
+    }
+
+    pub async fn from_path(path: &Path) -> Result<Self, PageableStreamError> {
+        if path.try_exists().is_err() {
+            return Err(PageableStreamError::FileNotFound(
+                path.display().to_string(),
+            ));
+        }
+        let source = tokio::fs::File::open(path).await?;
+
+        Ok(PagedFileStream {
+            index: 0,
+            blk_size: 1024,
+            cache: vec![],
+            prefetch: None,
+            file_source: Arc::new(Mutex::new(FileSource {
+                source,
+                has_more: true,
+            })),
+        })
     }
 
     pub fn set_blk_size(&mut self, blk_size: usize) {
@@ -111,51 +132,63 @@ mod test {
 
     #[tokio::test]
     async fn basic_paging() {
+        let blk_size = 1024;
         let mut test_file = NamedTempFile::new().unwrap();
-        populate_test_file(&mut test_file, 1024);
+        populate_test_file(&mut test_file, blk_size);
         let path = test_file.path();
 
         let as_file = tokio::fs::File::open(&path).await.unwrap();
         let mut page_stream = PagedFileStream::new(as_file);
 
-        assert_eq!(page_stream.prev().await, None);
-        for i in 0u8..10 {
-            let mut blk = Vec::with_capacity(1024);
-            blk.resize(1024, i);
-            assert_eq!(page_stream.next().await, Some(&blk));
-        }
-        assert_eq!(page_stream.next().await, None);
-        for i in (0u8..10).rev() {
-            let mut blk = Vec::with_capacity(1024);
-            blk.resize(1024, i);
-            assert_eq!(page_stream.prev().await, Some(&blk));
-        }
+        paginate_stream(&mut page_stream, blk_size).await;
         _ = test_file.close();
     }
 
     #[tokio::test]
     async fn custom_block_size() {
+        let blk_size = 4096;
+
         let mut test_file = NamedTempFile::new().unwrap();
-        populate_test_file(&mut test_file, 4096);
+        populate_test_file(&mut test_file, blk_size);
         let path = test_file.path();
 
         let as_file = tokio::fs::File::open(&path).await.unwrap();
         let mut page_stream = PagedFileStream::new(as_file);
-        page_stream.set_blk_size(4096);
+        page_stream.set_blk_size(blk_size);
 
+        paginate_stream(&mut page_stream, blk_size).await;
+        _ = test_file.close();
+    }
+
+    #[tokio::test]
+    async fn from_path() {
+        let blk_size = 1024;
+        let mut test_file = NamedTempFile::new().unwrap();
+        populate_test_file(&mut test_file, blk_size);
+        let path = test_file.path();
+
+        let mut page_stream = PagedFileStream::from_path(path)
+            .await
+            .expect("expect path {path.display()}");
+
+        paginate_stream(&mut page_stream, blk_size).await;
+
+        _ = test_file.close();
+    }
+
+    async fn paginate_stream(page_stream: &mut PagedFileStream, blk_size: usize) {
         assert_eq!(page_stream.prev().await, None);
         for i in 0u8..10 {
-            let mut blk = Vec::with_capacity(4096);
-            blk.resize(4096, i);
+            let mut blk = Vec::with_capacity(blk_size);
+            blk.resize(blk_size, i);
             assert_eq!(page_stream.next().await, Some(&blk));
         }
         assert_eq!(page_stream.next().await, None);
         for i in (0u8..10).rev() {
-            let mut blk = Vec::with_capacity(4096);
-            blk.resize(4096, i);
+            let mut blk = Vec::with_capacity(blk_size);
+            blk.resize(blk_size, i);
             assert_eq!(page_stream.prev().await, Some(&blk));
         }
-        _ = test_file.close();
     }
 
     fn populate_test_file(test_file: &mut NamedTempFile, blk_size: usize) {
