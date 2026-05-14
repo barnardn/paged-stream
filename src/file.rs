@@ -1,37 +1,168 @@
 use crate::PageableStream;
+use std::sync::Arc;
 use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::sync::{Mutex, oneshot};
 
-#[allow(dead_code)]
-pub struct PagedFileStream<'a> {
+struct FileSource {
+    source: File,
+    has_more: bool,
+}
+
+impl FileSource {
+    async fn read_page(&mut self, blk_size: usize) -> Option<Vec<u8>> {
+        if !self.has_more {
+            return None;
+        }
+        let mut buf = vec![0u8; blk_size];
+        let n = self.source.read(&mut buf).await.ok()?;
+        if n == 0 {
+            self.has_more = false;
+            return None;
+        }
+        buf.truncate(n);
+        Some(buf)
+    }
+}
+
+pub struct PagedFileStream {
     index: usize,
     blk_size: usize,
     cache: Vec<Vec<u8>>,
-    source: &'a File,
+    prefetch: Option<oneshot::Receiver<Option<Vec<u8>>>>,
+    file_source: Arc<Mutex<FileSource>>,
 }
 
-impl<'a> PagedFileStream<'a> {
-    pub fn new(source: &'a File) -> Self {
+impl PagedFileStream {
+    pub fn new(source: File) -> Self {
         PagedFileStream {
             index: 0,
             blk_size: 1024,
-            cache: Vec::with_capacity(16), // 16 pages of cache for now
-            source,
+            cache: vec![],
+            prefetch: None,
+            file_source: Arc::new(Mutex::new(FileSource {
+                source,
+                has_more: true,
+            })),
         }
     }
 
     pub fn set_blk_size(&mut self, blk_size: usize) {
         self.blk_size = blk_size;
     }
+
+    fn spawn_prefetch(&self) -> oneshot::Receiver<Option<Vec<u8>>> {
+        let (tx, rx) = oneshot::channel();
+        let arc = Arc::clone(&self.file_source);
+        let blk_size = self.blk_size;
+        tokio::spawn(async move {
+            let mut src = arc.lock().await;
+            let _ = tx.send(src.read_page(blk_size).await);
+        });
+        rx
+    }
 }
 
-impl<'a> PageableStream for PagedFileStream<'a> {
-    type Item = &'a [u8];
+impl PageableStream for PagedFileStream {
+    type Item = Vec<u8>;
 
     async fn prev(&mut self) -> Option<&Self::Item> {
-        unimplemented!();
+        if self.index == 0 {
+            return None;
+        }
+        self.index -= 1;
+        self.cache.get(self.index)
     }
 
     async fn next(&mut self) -> Option<&Self::Item> {
-        unimplemented!();
+        // collect completed prefetch into cache
+        if let Some(rx) = self.prefetch.take() {
+            if let Ok(Some(page)) = rx.await {
+                self.cache.push(page);
+            }
+        }
+
+        // direct fetch if still not in cache
+        if self.cache.get(self.index).is_none() {
+            let mut src = self.file_source.lock().await;
+            match src.read_page(self.blk_size).await {
+                Some(page) => {
+                    drop(src);
+                    self.cache.push(page);
+                }
+                None => return None,
+            }
+        }
+
+        self.prefetch = Some(self.spawn_prefetch());
+
+        let i = self.index;
+        self.index += 1;
+        self.cache.get(i)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::PagedFileStream;
+    use crate::PageableStream;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[tokio::test]
+    async fn basic_paging() {
+        let mut test_file = NamedTempFile::new().unwrap();
+        populate_test_file(&mut test_file, 1024);
+        let path = test_file.path();
+
+        let as_file = tokio::fs::File::open(&path).await.unwrap();
+        let mut page_stream = PagedFileStream::new(as_file);
+
+        assert_eq!(page_stream.prev().await, None);
+        for i in 0u8..10 {
+            let mut blk = Vec::with_capacity(1024);
+            blk.resize(1024, i);
+            assert_eq!(page_stream.next().await, Some(&blk));
+        }
+        assert_eq!(page_stream.next().await, None);
+        for i in (0u8..10).rev() {
+            let mut blk = Vec::with_capacity(1024);
+            blk.resize(1024, i);
+            assert_eq!(page_stream.prev().await, Some(&blk));
+        }
+        _ = test_file.close();
+    }
+
+    #[tokio::test]
+    async fn custom_block_size() {
+        let mut test_file = NamedTempFile::new().unwrap();
+        populate_test_file(&mut test_file, 4096);
+        let path = test_file.path();
+
+        let as_file = tokio::fs::File::open(&path).await.unwrap();
+        let mut page_stream = PagedFileStream::new(as_file);
+        page_stream.set_blk_size(4096);
+
+        assert_eq!(page_stream.prev().await, None);
+        for i in 0u8..10 {
+            let mut blk = Vec::with_capacity(4096);
+            blk.resize(4096, i);
+            assert_eq!(page_stream.next().await, Some(&blk));
+        }
+        assert_eq!(page_stream.next().await, None);
+        for i in (0u8..10).rev() {
+            let mut blk = Vec::with_capacity(4096);
+            blk.resize(4096, i);
+            assert_eq!(page_stream.prev().await, Some(&blk));
+        }
+        _ = test_file.close();
+    }
+
+    fn populate_test_file(test_file: &mut NamedTempFile, blk_size: usize) {
+        for i in 0u8..10 {
+            let mut blk = Vec::with_capacity(blk_size);
+            blk.resize(blk_size, i);
+            test_file.write(&blk).expect("failed writing block {i}");
+        }
     }
 }
