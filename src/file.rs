@@ -5,6 +5,7 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, oneshot};
 
+#[derive(Debug)]
 struct FileSource {
     source: File,
     has_more: bool,
@@ -26,6 +27,7 @@ impl FileSource {
     }
 }
 
+#[derive(Debug)]
 pub struct PagedFileStream {
     index: usize,
     blk_size: usize,

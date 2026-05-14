@@ -4,6 +4,7 @@ use crate::PageableStream;
 // demo impl to validate the scaffolding.
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct PagedVecStream<'a, T> {
     index: usize,
     source: &'a Vec<T>,
